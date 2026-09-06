@@ -1,0 +1,261 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 每小时自动同步一次
+    - cron: "0 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================
+      # Checkout 当前 Fork
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      # ==========================================
+      # 配置 Git
+      # ==========================================
+      - name: Configure Git
+        run: |
+          echo "=== Configure Git ==="
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ==========================================
+      # 添加 upstream
+      # ==========================================
+      - name: Configure upstream
+        run: |
+          echo "=== Configure upstream ==="
+
+          git remote remove upstream 2>/dev/null || true
+
+          git remote add upstream \
+            https://github.com/ConnersHua/RuleGo.git
+
+          git fetch origin --prune
+          git fetch upstream --prune
+
+      # ============================================================
+      # 同步不活跃分支 maѕter
+      #
+      # 注意：
+      # maѕter 中的 ѕ 是西里尔字母
+      #
+      # upstream/maѕter
+      #        ↓
+      # origin/maѕter
+      # ============================================================
+      - name: Sync inactive master
+        run: |
+          echo "=== Sync inactive maѕter ==="
+
+          git push origin \
+            "refs/remotes/upstream/maѕter:refs/heads/maѕter" \
+            --force
+
+      # ============================================================
+      # 备份活跃 master 的 Workflow
+      # ============================================================
+      - name: Backup active master files
+        run: |
+          echo "=== Backup active master files ==="
+
+          rm -rf /tmp/master-backup
+
+          mkdir -p /tmp/master-backup
+
+          # ------------------------------------------
+          # 备份 Workflow
+          # ------------------------------------------
+          if git ls-tree -d --name-only origin/master .github/workflows 2>/dev/null | grep -q "workflows"; then
+            git archive \
+              origin/master \
+              .github/workflows \
+              | tar -x -C /tmp/master-backup
+
+            echo "Workflow backup completed."
+          else
+            echo "No existing workflows found on origin/master."
+          fi
+
+          # ------------------------------------------
+          # 备份 heartbeat
+          # ------------------------------------------
+          if git cat-file -e origin/master:.github/sync-heartbeat 2>/dev/null; then
+            mkdir -p /tmp/master-backup/.github
+
+            git show \
+              origin/master:.github/sync-heartbeat \
+              > /tmp/master-backup/.github/sync-heartbeat
+
+            echo "Heartbeat backup completed."
+          else
+            echo "No existing heartbeat found."
+          fi
+
+      # ============================================================
+      # 同步活跃 master
+      #
+      # upstream/master
+      #        ↓
+      #      master
+      # ============================================================
+      - name: Sync active master
+        run: |
+          echo "=== Sync active master ==="
+
+          git checkout -B master upstream/master
+
+      # ============================================================
+      # 恢复本 Fork 的 Workflow
+      # ============================================================
+      - name: Restore active master workflows
+        run: |
+          echo "=== Restore active master workflows ==="
+
+          if [ -d "/tmp/master-backup/.github/workflows" ]; then
+            mkdir -p .github
+
+            rm -rf .github/workflows
+
+            cp -R \
+              /tmp/master-backup/.github/workflows \
+              .github/
+
+            echo "Workflow restore completed."
+          else
+            echo "No workflow backup to restore."
+          fi
+
+      # ============================================================
+      # 恢复 heartbeat
+      # ============================================================
+      - name: Restore heartbeat
+        run: |
+          echo "=== Restore heartbeat ==="
+
+          if [ -f "/tmp/master-backup/.github/sync-heartbeat" ]; then
+            mkdir -p .github
+
+            cp \
+              /tmp/master-backup/.github/sync-heartbeat \
+              .github/sync-heartbeat
+
+            echo "Heartbeat restore completed."
+          else
+            echo "No previous heartbeat found."
+          fi
+
+      # ============================================================
+      # 40 天维护仓库活动
+      #
+      # 文件位置：
+      # .github/sync-heartbeat
+      #
+      # 注意：
+      # 不放在 .github/workflows/，
+      # 避免 GitHub 要求 workflows 权限。
+      # ============================================================
+      - name: Maintain repository activity
+        run: |
+          echo "=== Check 40-day repository activity ==="
+
+          HEARTBEAT_FILE=".github/sync-heartbeat"
+
+          mkdir -p .github
+
+          if [ -f "$HEARTBEAT_FILE" ]; then
+            LAST_HEARTBEAT=$(cat "$HEARTBEAT_FILE")
+
+            LAST_HEARTBEAT_TS=$(
+              date -d "$LAST_HEARTBEAT" +%s 2>/dev/null || echo 0
+            )
+          else
+            LAST_HEARTBEAT_TS=0
+          fi
+
+          NOW_TS=$(date +%s)
+
+          if [ "$LAST_HEARTBEAT_TS" -eq 0 ]; then
+            DAYS=999
+          else
+            DAYS=$(( (NOW_TS - LAST_HEARTBEAT_TS) / 86400 ))
+          fi
+
+          echo "Days since last heartbeat: ${DAYS}"
+
+          if [ "$DAYS" -ge 40 ]; then
+            NOW_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            echo "Creating heartbeat: ${NOW_UTC}"
+
+            printf '%s\n' "$NOW_UTC" > "$HEARTBEAT_FILE"
+
+            git add "$HEARTBEAT_FILE"
+
+            git commit \
+              -m "chore: keep repository active"
+
+            echo "Heartbeat commit created."
+          else
+            echo "No heartbeat required."
+          fi
+
+      # ============================================================
+      # 提交 master 的变化
+      # ============================================================
+      - name: Commit active master changes
+        run: |
+          echo "=== Commit active master changes ==="
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit \
+              -m "Sync master from upstream/master and preserve workflows"
+          fi
+
+      # ============================================================
+      # 推送活跃 master
+      # ============================================================
+      - name: Push active master
+        run: |
+          echo "=== Push active master ==="
+
+          git push origin \
+            "refs/heads/master:refs/heads/master" \
+            --force
+
+      # ============================================================
+      # 最终检查
+      # ============================================================
+      - name: Verify branches
+        run: |
+          echo "=== Verify branches ==="
+
+          echo ""
+          echo "Origin branches:"
+          git ls-remote --heads origin
+
+          echo ""
+          echo "Upstream branches:"
+          git ls-remote --heads upstream
+
+          echo ""
+          echo "=== Sync completed successfully ==="
